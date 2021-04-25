@@ -1,0 +1,961 @@
+---
+title: 'Capstone Project: Cost of Churn Prediction'
+author: "Tony Cronin"
+date: "4/25/2021"
+output: pdf_document
+bibliography: ./references.bib
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c("tidyverse", "gridExtra", "grid", "lattice", "knitr", "lime", "tidyquant", "rsample", "recipes", "yardstick", "corrr", "readr","reshape2", "caret", "mgcv", "earth", "cutpointr",  "flextable", "mlbench", "pROC", "randomForest", "gbm", "rstudioapi", "gridExtra", "corrplot")
+
+## Install packages From CRAN if they are not installed.
+for (p in packages) {
+  if (p %in% rownames(installed.packages()) == FALSE) {
+    install.packages(p, repos = 'http://cran.us.r-project.org')
+  }
+}
+## Load the packages
+for (p in packages) {
+  suppressPackageStartupMessages(
+    library(p, quietly = TRUE, character.only =TRUE ) 
+  )
+}
+
+# remove everything
+rm(list = c(ls()))
+
+# i prefer to not to have scientific numbers
+options(scipen = 999)
+
+# set working directory to current document path
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+```
+
+```{r import and clean, echo=FALSE, warning=FALSE, include=FALSE}
+
+# load bank churn
+bank_churn <- readr::read_csv("data/Churn_Modelling.csv")
+
+
+# clean up data -----------------------------------------------------------
+
+# import the data and rename Exited to Churn
+bank_churn_data_tbl <- bank_churn %>%
+  select(-c(RowNumber, CustomerId, Surname)) %>%
+  drop_na() %>%
+  select(Exited, everything()) %>% 
+  mutate(mutate(across(where(is_character),as_factor))) %>% 
+  rename(Churn = Exited)#
+
+```
+
+
+## Executive Summary
+
+### What is customer **Churn**? 
+
+**Customer Churn** is defined as loosing customers leaving your business or service for one of your competitors. 
+
+- [@hadden2007computer] tell us "a business incurs much higher charges when attempting to win new customers than to retain existing ones". 
+
+- [@hadden2007computer] tells us "companies have acknowledged that their business strategies should focus on identifying those customers who are likely to churn".
+
+- According to [@Avoidabl8:online] churn costs Business Billions. In one example, he estimates churn costs energy providers "£25.05 billion per annum" in the UK market alone. 
+
+- Stripling suggests [@stripling2018profit] in saturated markets acquiring new customers is "eminently challenging, and costs five to six times more than to prevent existing customers from churning"
+
+- We can use ML to predict customer churn, but there is a problem, [@lemmens2020managing] state "conventional approach has been to target customers either based on their predicted churn probability" which does not reflect business value. In Machine Learning we evaluate the cost of a model with AUC or RMSE scores, however in a business context not all predictions are costed the same way [@lemmens2020managing] state that standard ML predictions "ignore that some customers contribute more to the profitability of retention campaigns than others".
+
+**Conclusion:** businesses that develop strategies to reduce customer could increase profits and block the growth of their competitors, but any strategy employed must pay close attention to the cost of our prediction.
+
+```{r methods analysis, echo=FALSE, warning=FALSE}
+
+bank_rows <- nrow(bank_churn_data_tbl)
+bank_cols <- ncol(bank_churn_data_tbl)
+
+# variable names
+
+bank_variables <- names(bank_churn_data_tbl)
+bank_variables <- paste0(bank_variables, collapse = ", ") 
+
+```
+
+## Analysis
+
+There is very little data on customer churn available in the public Domain. For most business' churn data is a closely guarded secret. One of few available is **[Bank Customer churn Data](https://www.kaggle.com/adammaus/predicting-churn-for-bank-customers)**, which was released in 2019.
+
+We will investigate the churn predictors in this data set. 
+
+### Understanding our data 
+
+In  **[Bank Customer Churn](https://www.kaggle.com/barelydedicated/bank-customer-churn-modeling)**:
+
+- we have `r bank_rows` observations and `r bank_cols` variables
+
+- Variables are: `r bank_variables`.
+
+```{r glimpse bank, warning=FALSE}
+
+glimpse(bank_churn_data_tbl)
+
+summary(bank_churn_data_tbl)
+
+```
+
+### Correlation 
+
+We can check is any of our predictor variables are highly correlated, we will remove any that are, as this will throw the accuracy of our model:
+
+```{r colinearity}
+
+# analyze the bank influencing factors
+cor_bank <- bank_churn_data_tbl %>% 
+  keep(is.numeric) %>% 
+  cor()
+  
+corrplot::corrplot(cor_bank, method = "circle")
+
+```
+
+All good here, no need to remove any of our numeric predictor variables.
+
+### Target Variable: Churn
+
+Churn: the target variable, I've changed the column name from 'Exited' to 'Churn', as the analysis is about churn. A `1` in this cell tells us a customer has churned. 2037 of the total 10000 has churned.
+
+```{r churn ggplot, warning=FALSE}
+
+bank_churn_n <- bank_churn_data_tbl %>% 
+  group_by(Churn) %>% 
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  tally() 
+
+bank_churn_n %>% 
+  ggplot(aes(Churn, n, fill = Churn)) +
+  geom_col() +
+  geom_text(label = bank_churn_n$n) +
+  theme(legend.position = 'none') +
+  labs(title = "Bank Churn: Number of Customers who have churned", 
+       y = "Number of Customers")
+
+bank_churn_n %>% 
+  kableExtra::kable() %>% 
+  kableExtra::kable_styling()
+
+```
+
+### Predictor variables
+
+- **CreditScore**: ranges from 350 to 850, with a mean of 650.
+- **Geography**: customers come from three countries from largest to smallest France, Germany and Spain.
+- **Gender**: 5457 Men and 4543 Women
+- **Age**: the customers age range from 18 to 92, the average is 38
+- **Tenure**: how many year a bank customer range from 0 to 10, the average is 5.
+- **Balance**: how much money does a customer have in the bank, range from Euro 0 to 250,898, the average is 76,486
+- **NumOfProducts**: banking products per customer, range 1 to 4, average is 1.53
+- **HasCrCard**: owns a credit card, 7055 customers of the 10000 total.
+- **IsActiveMember**: presumably, makes regular deposits, 5151 of the 10000 total.
+- **EstimatedSalary**: customers annual salary, range from Euro 11.58 to 199992, mean is 100090.
+
+```{r melt vars ggplot, echo=TRUE, warning=FALSE}
+
+# lets melt the data so we can quickly display 
+melt.bank <- melt(bank_churn_data_tbl)
+
+# 
+p2 <- melt.bank %>% 
+  ggplot(aes(x = value, fill = variable)) + 
+  stat_density(show.legend = FALSE) + 
+  facet_wrap( ~variable, scales = "free") +
+  labs(title = "Bank Variables")
+
+p2
+
+```
+
+### Categorical Predictor Variables
+
+```{gender gg, warning=FALSE}
+
+# 25 percent of females churned, a higher proportion of the males
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  dplyr::group_by(Gender, Churn) %>% 
+  tally() %>% 
+  ggplot(aes(Gender, n, fill = Churn )) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by gender")
+
+```
+
+**Gender Effect:** women seem more likely to churn.
+
+```{r age ggplot, warning=FALSE}
+
+# 40 to 50 age range seems to be the age to churn, younger customers seem to be more stable. Could it be older customers have done with saving and now need to invest their money?
+age_hist_gg <- bank_churn_data_tbl %>% 
+  mutate(Churn = as.factor(Churn)) %>% 
+  ggplot(aes(x = Age, fill = Churn)) +
+  geom_histogram(binwidth = 5, show.legend = TRUE) +
+  scale_x_continuous(breaks = seq(0,100, by=10)) +
+  labs(title = "Bank churn: Histogram of churned customers by age")
+
+age_hist_gg
+
+```
+
+**Age seems to be an significant**: 40 to 50 age range seems to be the age to churn, younger customers seem to be more stable. Could it be older customers have done with saving and now need to invest their money? 
+
+```{r balance gg, warning=FALSE}
+
+bank_churn_data_tbl %>% 
+  mutate(Churn = as.factor(Churn)) %>% 
+  ggplot(aes(x = Balance, fill = Churn)) +
+  geom_histogram(show.legend = TRUE) +
+  scale_x_continuous(breaks = seq(0,max(bank_churn_data_tbl$Balance), by=5000)) +
+  labs(title = "Bank churn: Histogram of churned customers by balance") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 6))
+
+```
+
+**Balance is not massively significant** I look's like churned by balance is only significant by 0 balance, it seems logical, customers are much more likely to churn, if they have no deposit. What happens if we bucket the balances?
+
+```{r balance cut gg, warning=FALSE}
+
+# does the balance effect the churn?
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  mutate(BalanceCuts = cut(Balance, breaks = 5,
+                           labels = c("First", "Second", "Third", "Fourth", "Fifth"))) %>%
+  dplyr::group_by(BalanceCuts, Churn) %>% 
+  tally() %>% 
+  ggplot(aes(BalanceCuts, n, fill = Churn )) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by Balance (stratified)")
+
+```
+
+**Balance effect**: If we stratify the Balance, the higher the balance, the more likely the customer is to churn.
+
+```{r geo gg, warning=FALSE}
+
+# Germany seems to be the churn capital
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  dplyr::group_by(Geography, Churn) %>% 
+  tally() %>% 
+  ggplot(aes(Geography, n, fill = Churn )) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by Geography")
+
+```
+
+**Geography seems significant:** Germany seems to be the churn capital!
+
+```{r geo balance, warning=FALSE}
+
+# 
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  dplyr::group_by(Geography, Churn) %>% 
+  summarise(balance = sum(Balance)) %>% 
+  ggplot(aes(Geography, balance, fill = Churn )) + 
+  geom_bar(position="dodge", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by Geography and Balance")
+
+```
+
+**German balance**: if we measure the balance, Germany has the biggest balance that churned.
+
+```{r number of products, warning=FALSE}
+
+# customers with more products churn more. 
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  dplyr::group_by(NumOfProducts, Churn) %>% 
+  tally() %>% 
+  ggplot(aes(NumOfProducts, n, fill = Churn )) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by NumOfProducts")
+
+```
+
+**NumOfProducts effect**: worryingly all customers who have 4 products have churned.
+
+```{r Credit card gg, warning=FALSE}
+
+# credits card has no effect 
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  dplyr::group_by(HasCrCard, Churn) %>% 
+  tally() %>% 
+  ggplot(aes(HasCrCard, n, fill = Churn )) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by HasCrCard")
+
+```
+
+**Credit Card**: if a customer has a credit card or not, seems to have no/little effect.
+
+```{r active, warning=FALSE}
+
+# less active members seen to churn more
+bank_churn_data_tbl %>%
+  mutate(Churn = if_else(Churn == 1, "Churned", "Remained")) %>% 
+  mutate(IsActiveMember = if_else(IsActiveMember == 1, "Active", "Less Active")) %>% 
+  dplyr::group_by(IsActiveMember, Churn) %>% 
+  tally() %>% 
+  ggplot(aes(IsActiveMember, n, fill = Churn )) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Bank churn: Ratio of churned customers by IsActiveMember")
+
+```
+
+**IsActiveMember effect:** active customers with less activity seem more likely to churn.
+
+## Modeling
+
+We are targeting a numeric variable - Churn (0 or 1). Logistic regression is the chosen algorithm for such a categorization problem. I'd like the ability to choose the **cutoff point** for the model, as I will demonstrate, that financial cost of prediction may outweigh the accuracy of the model.
+
+I will use a number of algorithms (as part of research, I evaluated more, but choose the four below based largely on accuracy and speed), to model Churn, these are:
+
+- [k-Nearest Neighbors algorithm (KNN)](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) -  Evelyn Fix and Joseph Hodges in 1951.
+
+- [Generalized Boosted Regression Models](https://en.wikipedia.org/wiki/Gradient_boosting) (GBM) - Friedman 1999. 
+
+- [Multivariate adaptive regression spline](https://en.wikipedia.org/wiki/Multivariate_adaptive_regression_spline) (MARS) - Friedman in 1991
+
+- [General Logistic Model NET](https://glmnet.stanford.edu/articles/glmnet.html) (GLM) - Freidman, Hastie and Tibshirani 2001.
+
+```{r split the data and helper functions, echo=FALSE, warning=FALSE}
+
+# factorize the bank churn data churn target variable
+bank_data <- bank_churn_data_tbl 
+
+# create sample index,  
+bank_train_Index <-  bank_churn_data_tbl $Churn %>% 
+  caret::createDataPartition(p = .8, list = FALSE)
+
+bank_train <-  bank_churn_data_tbl[c(bank_train_Index), ]
+bank_test  <-  bank_churn_data_tbl[-c(bank_train_Index), ] 
+
+# caret pre process
+PP <- c('center', 'scale')
+
+# a helper function to help us understand the impact of our cut off values later
+cutoff_fun <- function(x, df){
+  # we are returning a list each run from 1: 10
+  datatable <- c(
+    # we are running from 1 to 9 using ldply, so divide x by 10 to get a decimal
+    x <- x/10,
+    # Compute the percentage of correctly classified customers who stayed
+    as.numeric( sum(( df$predicted <= x ) & ( df$Churn == 0) )/ sum( df$Churn == 0 )),
+    # customer has not churned rate of prediction is greater that x
+    as.numeric( sum(if_else( df$Churn == 0, df$predicted <= x, FALSE ))),
+    # Compute the percentage of correctly classified customers who left
+    sum(( df$predicted > x ) & ( df$Churn == 1 ))/sum( df$Churn == 1 ),
+    # customer has churned and prediction is greater than x
+    as.numeric( sum(if_else( df$Churn == 1, df$predicted > x, FALSE ))),
+    # sum( df$prediction > x ),
+    # a percentage of correctly exited customers
+    mean(( df$predicted > x ) == ( df$Churn == 1 )) 
+  )
+  # rename the datatable
+  names( datatable ) <- c( "cutoff/prediction", "stayers_classified ", "stayers_classifed_number",
+                           "leavers_classified", "leavers_classified_number", "percentage_correct" )
+  return( datatable )
+}
+
+
+
+```
+
+```{r churn gg functions, echo=FALSE, warning=FALSE, message=FALSE}
+
+churn_bars_gg <- function(data_df = bank_test_knn, 
+                          threshold_num = 0.313, 
+                          text_str = "Telco Churn: KNN" ) {
+  
+ data_df %>% 
+    mutate(predicted = predicted >= threshold_num ) %>% 
+    mutate(Churn = as.factor(Churn)) %>% 
+    group_by(Churn) %>% 
+    summarise(`predicted to churn`= sum(predicted),
+              `not predicted` = n() - `predicted to churn`) %>% 
+    melt(id.vars = "Churn") %>% 
+    ggplot( aes( Churn, value, fill = variable  )) + 
+    geom_col( ) +
+    labs( title = paste0(text_str, " Test Set's Predicted Score"),
+          subtitle = paste0("Cutoff Value of ", threshold_num)) 
+  
+}
+
+churn_density <- function(data_df = bank_test_knn, 
+                          threshold_num = 0.313, 
+                          text_str = "Telco Churn: KNN") {
+  
+  data_df %>% 
+    ggplot( aes( predicted, color = as.factor(Churn) ) ) + 
+    geom_density( size = 1 ) +
+    geom_vline( xintercept = threshold_num, linetype = "dashed" ) +
+    labs( title = paste0( text_str, " Test Set's Predicted Score, density plot" ),
+          subtitle = paste0( "Cuttoff line added at ", threshold_num )) 
+  
+}
+
+```
+
+### KNN
+
+```{r bank knn, echo=FALSE, warning=FALSE}
+
+# bank knn -------------------------------------------------------------
+# 
+set.seed(123)
+
+# knn tut is here: http://www.sthda.com/english/articles/35-statistical-machine-learning-essentials/142-knn-k-nearest-neighbors-essentials/
+
+# train the model
+bank_knn_model <- train(
+  Churn ~., data = bank_train, method = "knn",
+  trControl = trainControl("cv", number = 10),
+  preProcess = c("center", "scale"),
+  tuneLength = 20
+)
+
+# Plot model accuracy vs different values of k
+plot(bank_knn_model)
+
+# Print the best tuning parameter k that
+# maximizes model accuracy
+# 21
+bank_knn_model$bestTune
+
+bank_test_knn <- bank_test
+
+# Add a new column, to hold the predictions on the test data
+bank_test_knn$predicted <- bank_knn_model %>% 
+  predict( bank_test_knn )
+
+
+# find the best cut off value
+# Compute model accuracy rate 
+# bank_knn_roc_plot <- pROC::roc( Churn ~ predicted, bank_test_knn )
+
+# plot(bank_knn_roc_plot, print.thres=TRUE, main = "Bank Churn: KNN ")
+
+# my threshold is 
+threshold_bank_knn = 0.186
+
+bank_churn_knn <- churn_bars_gg(data_df = bank_test_knn, 
+                                    threshold_num = threshold_bank_knn, 
+                                    text_str = "Bank Churn: KNN " )
+
+bank_churn_knn
+
+```
+
+**KNN predicted:** we can see above how well KNN does with predicting churn (and mis-prediction). 
+
+```{r knn denisty plot, echo=FALSE, warning=FALSE}
+
+telco_churn_density_knn <- churn_density(data_df = bank_test_knn, 
+                                            threshold_num = threshold_bank_knn, 
+                                            text_str = "Bank Churn: KNN " )
+
+telco_churn_density_knn
+
+```
+
+**KNN density plot:** For an ideal double density plot we want the distribution of scores to be 
+separated, with the score of the negative instances to be on the left and 
+the score of the positive instance to be on the right. In the KNN density plot, we can see that the negative and positives are not well distributed.
+
+### GBM
+
+```{r gbm, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+
+set.seed(123)
+
+# train the model
+bank_gbm_model <- train(
+  Churn ~., data = bank_train, method = "gbm",
+  trControl = trainControl("cv", number = 10),
+  bag.fraction=0.75
+)
+
+# Plot model accuracy vs different values of k
+plot(bank_gbm_model)
+
+bank_test_gbm <- bank_test
+
+# Add a new column, to hold the predictions on the test data
+bank_test_gbm$predicted <- bank_gbm_model %>% 
+  predict( bank_test_gbm )
+
+# Compute model accuracy rate 
+bank_gbm_roc_plot <- pROC::roc( Churn ~ predicted, bank_test_gbm )
+
+plot(bank_gbm_roc_plot, print.thres=TRUE, main = "Bank Churn: GBM ")
+
+# my threshold is 
+threshold_bank_gbm = 0.226
+
+bank_churn_gbm <- churn_bars_gg(data_df = bank_test_gbm, 
+                                threshold_num = threshold_bank_gbm, 
+                                text_str = "Bank Churn: GBM " )
+
+
+```
+
+```{r}
+
+bank_churn_gbm
+
+```
+
+```{r gbm density, echo=FALSE, warning=FALSE}
+
+bank_churn_gbm
+
+telco_churn_density_gbm <- churn_density(data_df = bank_test_gbm, 
+                                         threshold_num = threshold_bank_gbm, 
+                                         text_str = "Bank Churn: GBM " )
+
+telco_churn_density_gbm
+
+```
+
+```{r earth, include=FALSE}
+
+# bank earth  ------------------------------------------------------------
+
+set.seed(123)
+
+# train the model
+bank_earth_model <- train(
+  Churn ~., data = bank_train, method = "earth",
+  trControl = trainControl("cv", number = 10)
+)
+
+# Plot model accuracy vs different values of k
+plot(bank_earth_model)
+
+bank_test_earth <- bank_test
+
+# Add a new column, to hold the predictions on the test data
+bank_test_earth$predicted <- bank_earth_model %>% 
+  predict( bank_test_earth )
+
+
+bank_earth_roc_plot <- pROC::roc( Churn ~ predicted, bank_test_earth )
+
+plot(bank_earth_roc_plot, print.thres = TRUE, main = "Bank Churn: Earth ROC ")
+
+# my threshold is 
+threshold_bank_earth = 0.219
+
+bank_churn_earth <- churn_bars_gg(data_df = bank_test_earth, 
+                                   threshold_num = threshold_bank_earth, 
+                                   text_str = "Bank Churn: Earth " )
+
+bank_churn_earth
+
+bank_churn_density_earth <- churn_density(data_df = bank_test_gbm, 
+                                           threshold_num = threshold_bank_earth, 
+                                           text_str = "Bank Churn: Earth " )
+
+bank_churn_density_earth
+
+```
+
+```{r earth plots}
+
+bank_churn_earth
+
+bank_churn_density_earth
+
+```
+
+```{r glmnet, include=FALSE}
+
+set.seed(123)
+
+# train the model
+bank_glmnet_model <- train(
+  Churn ~., data = bank_train, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  preProcess = c("center", "scale"),
+  tuneGrid=expand.grid(
+    .alpha=1,
+    .lambda=seq(0, 100, by = 0.1))
+)
+
+bank_test_glmnet <- bank_test
+
+# Add a new column, to hold the predictions on the test data
+bank_test_glmnet$predicted <- bank_glmnet_model %>% 
+  predict( bank_test_glmnet )
+
+# Compute model accuracy rate 
+bank_glmnet_roc_plot <- pROC::roc( Churn ~ predicted, bank_test_glmnet )
+
+plot(bank_glmnet_roc_plot, print.thres=TRUE, main = "Bank Churn: glmnet ")
+
+# my threshold is 
+threshold_bank_glmnet = 0.267
+
+bank_churn_glmnet <- churn_bars_gg(data_df = bank_test_glmnet, 
+                                threshold_num = threshold_bank_glmnet, 
+                                text_str = "Bank Churn: glmnet " )
+
+bank_churn_glmnet
+
+telco_churn_density_glmnet <- churn_density(data_df = bank_test_glmnet, 
+                                         threshold_num = threshold_bank_glmnet, 
+                                         text_str = "Bank Churn: glmnet " )
+
+telco_churn_density_glmnet
+
+```
+
+```{r glmnet plots, echo=FALSE, warning=FALSE}
+
+bank_churn_glmnet
+
+telco_churn_density_glmnet
+
+```
+
+
+```{r join all pred, include=FALSE}
+
+# duplicate the bank df
+data_bank_preds <- bank_data
+
+# apply each of our models
+data_bank_preds$predicted_knn <- bank_knn_model %>% 
+  predict( data_bank_preds )
+
+data_bank_preds$predicted_gbm <- bank_gbm_model %>% 
+  predict( data_bank_preds )
+
+data_bank_preds$predicted_mars <- bank_earth_model %>% 
+  predict( data_bank_preds )
+
+data_bank_preds$predicted_glmnet <- bank_glmnet_model %>% 
+  predict( data_bank_preds )
+
+```
+
+```{r CLV calc, include=FALSE}
+
+# what is the churn rate [1] 0.2037
+data_bank_remain_rate <- abs(sum(data_bank_preds$Churn==1)/nrow(data_bank_preds) - 1)
+bank_charge_per_anum <- 250
+interest_rate <- .04
+cost_of_keeping_customer <- bank_charge_per_anum
+
+```
+
+## Model Accuracy
+
+```{r counting the cost, echo=FALSE, warning=FALSE, message=FALSE}
+
+# simplified clv formula to calculate a value to each customer
+data_bank_preds <- data_bank_preds %>% 
+  # customer balance by interest rate charged by bank of 4%
+  # charges for each customer per anum
+  mutate(clv = ( Balance * interest_rate ) + (bank_charge_per_anum * Tenure))
+
+# bank customer prediction --------------------------------------
+# 
+# average clv of a customer
+clv_average <- mean(data_bank_preds$clv)
+# 
+
+#' This function returns a dataframe that contains the cost of each customer
+#' predicted to churn, but did not. We can then add a cost to each customer
+#' and rate each algorithm by cost.
+#'
+#' @param df  a data frame, specifically one called data_bank_preds
+#' @param churn value to match Churn column 1 or 0
+#' @param pred value to match the predicted churn column, either 1 or 0
+#'
+#' @return a dataframe, comparing each algorithm by cost per customer
+#' @export
+#'
+#' @examples
+#' 
+cost_matrix <- function(df = data_bank_preds, 
+                        churn = 1, 
+                        pred = 1) {
+  
+  # first filter everything
+  df <- df %>% 
+    filter( Churn == churn)
+  
+  df_1 <- df %>% 
+    # i'm casting prediction to 1 or 0 here
+    mutate(predicted_knn = predicted_knn >= threshold_bank_knn ) %>% 
+    filter(predicted_knn == pred ) %>% 
+    summarise(customers = n(),
+              type = "KNN") %>% 
+    melt()
+  
+  df_2 <- df %>% 
+    # i'm casting prediction to 1 or 0 here
+    mutate(predicted_gbm = predicted_gbm >= threshold_bank_gbm ) %>%
+    filter(predicted_gbm == pred ) %>% 
+    summarise(customers = n(),
+              type = "GBM") %>% 
+    melt()
+  
+  df_3 <- df %>% 
+    # i'm casting prediction to 1 or 0 here
+    mutate(predicted_mars = predicted_mars >= threshold_bank_earth ) %>%
+    filter(predicted_mars == pred ) %>%  
+    summarise(customers = n(),
+              type = "MARS") %>% 
+    melt()
+  
+  df_4 <- df %>% 
+    # i'm casting prediction to 1 or 0 here
+    mutate(predicted_glmnet = predicted_glmnet >= threshold_bank_glmnet ) %>%
+    filter(predicted_glmnet == pred ) %>% 
+    summarise(customers = n(),
+              type = "GLMNET") %>% 
+    melt()
+  
+  df_ret <- df_1 %>% 
+    full_join( df_2 ) %>% 
+    full_join( df_3 ) %>% 
+    full_join( df_4 )
+    
+    return( df_ret )
+  
+}
+
+# cost of incorrectly predicted customers: 
+# predicted not to churn but did not, 
+# assuming the retention initiative
+# costs the bank 250 per customer
+churned_F_predicted_T <- cost_matrix(churn = 0, pred = 1)
+
+# cost of incorrectly predicted churners:
+# not predicted to churn but did,
+# assuming loss of a mean CLV per churner
+churned_T_predicted_F <- cost_matrix(churn = 1, pred = 0)
+
+# cost of incorrectly predicted churners:
+# not predicted to churn but did,
+# assuming loss of a mean CLV per churner
+churned_T_predicted_T <- cost_matrix(churn = 1, pred = 1)
+
+
+ft <- churned_F_predicted_T %>% 
+  ggplot(aes(type, value, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 2500)) +  
+  geom_text(label = churned_F_predicted_T$value) +
+  labs(title = "Bank Churn: customers incorrectly predicted to churn",
+       x ="", y = "Customers")
+
+tf <- churned_T_predicted_F %>% 
+  ggplot(aes(type, value, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 2500)) +
+  geom_text(label = churned_T_predicted_F$value) +
+  labs(title = "Bank Churn: customers not predicted to churn, but did",
+       x ="Algorithm", y = "")
+
+tt <- churned_T_predicted_T %>% 
+  ggplot(aes(type, value, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 2500)) +
+  geom_text(label = churned_T_predicted_T$value) +
+  labs(title = "Churn: customers predicted to churn and did churn",
+       x ="", y = "")
+
+```
+
+```{r compar_cust gg, warning=FALSE, echo=FALSE, fig.height=7}
+
+grid.arrange(ft, tf, tt, nrow = 3)
+
+```
+
+We can see that of our four algorithms, MARS predicted the most customers who would churn (1631), it also predicted a smaller amount of customers where predicted to churn but did not (400), however it predicted the largest amount of customers to churn, but who did not (2139).
+
+```{r pred kables, warning=FALSE, echo=FALSE}
+
+churned_F_predicted_T %>% 
+  select(-c(variable)) %>% 
+  rename(customers = value) %>% 
+  kableExtra::kable(caption = "Bank Churn: customers incorrectly predicted to churn") %>% 
+  kableExtra::kable_styling()
+
+churned_T_predicted_F %>% 
+  select(-c(variable)) %>% 
+  rename(customers = value) %>% 
+  kableExtra::kable(caption = "Bank Churn: customers not predicted to churn, but did") %>% 
+  kableExtra::kable_styling()
+
+tt <- churned_T_predicted_T %>% 
+  select(-c(variable)) %>% 
+  rename(customers = value) %>% 
+  kableExtra::kable(caption = "Churn: customers predicted to churn and did churn") %>% 
+  kableExtra::kable_styling()
+
+```
+
+
+## Customer Lifetime Value
+
+Customer Lifetime Value (CLV) is the present value of the future cash flows associated with a customer (Pfeifer et al, 2005). [@kahreh2014analyzing] propose a complex algorithm based on data we do not have. I've simplified their algorithm thusly:
+
+$$
+Customer Lifetime Value = (( Balance * Interest Rate ) + (Bank Charge Per Anum * Tenure))*CostOfKeepingCustomer
+$$
+Now we will use our simple CLV to model the value of loosing our customers vs the predictive accuracy of our algorithm. We will assume that our bank makes a special offer of one year free banking (Euro `r cost_of_keeping_customer`) to keep our customers predicted to churn. 
+
+```{r prediction cost by balance, warning=FALSE, include=FALSE}
+
+# bank customer prediction --------------------------------------
+# 
+# average clv of a customer
+clv_average <- round(mean(data_bank_preds$clv))
+
+# 
+# in this case a customer predicted to churn, 
+# would be offered a discount, or free gift
+# to the value of 250
+churned_F_predicted_T_cost <- churned_F_predicted_T %>% 
+  mutate(cost_of_keeping = value * cost_of_keeping_customer)
+
+# in this case a customer who churned, but was not predicted would
+# cost clv lost, this is money lost to the bank
+churned_T_predicted_F_cost <-  churned_T_predicted_F %>% 
+  mutate(clv_lost = value * clv_average)
+
+
+churned_T_predicted_T_saving <- churned_T_predicted_T %>% 
+  mutate(clv_saved = value * clv_average)
+
+# plot that
+
+ft <- churned_F_predicted_T_cost %>% 
+  ggplot(aes(type, cost_of_keeping, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, max(churned_T_predicted_T_saving$clv_saved))) + 
+  geom_text(label = churned_F_predicted_T_cost$cost_of_keeping) +
+  labs(title = "Bank Churn: cost of \nincorrectly predicted to churn",
+       x ="", y = "Cost in Euro")
+
+tf <- churned_T_predicted_F_cost %>% 
+  ggplot(aes(type, clv_lost, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, max(churned_T_predicted_T_saving$clv_saved))) + 
+  geom_text(label = churned_T_predicted_F_cost$clv_lost) +
+  labs(title = "Bank Churn: costs of not \npredicted to churn, but did",
+       x ="Algorithm", y = "Cost in Euro")
+
+tt <- churned_T_predicted_T_saving %>% 
+  ggplot(aes(type, clv_saved, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, max(churned_T_predicted_T_saving$clv_saved))) +
+  geom_text(label = churned_T_predicted_T_saving$clv_saved) +
+  labs(title = "Churn: savings of predicted to\n churn and did churn",
+       x ="", y = "Cost in Euro")
+
+
+
+# type clv_saved
+# 1    KNN   6052380
+# 2    GBM   6357030
+# 3   MARS   6665742
+# 4 GLMNET   5260290
+bank_cost <- churned_T_predicted_T_saving[c(1,4)]
+
+bank_cost$clv_lost <-  churned_T_predicted_F_cost$clv_lost
+
+bank_cost$cost_of_keeping <- churned_F_predicted_T_cost$cost_of_keeping
+
+
+bank_cost <- bank_cost %>% 
+  mutate(potential_all_up_saving = clv_saved - clv_lost - cost_of_keeping)
+
+
+# 
+
+```
+
+```{r the cost plot, echo=FALSE, fig.height=6}
+
+grid.arrange(ft, tf, tt, nrow = 3)
+
+bank_cost %>% 
+  ggplot(aes(type, potential_all_up_saving, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(label = format(bank_cost$potential_all_up_saving, big.mark = ",")) +
+  labs(title = "Bank Churn: The most money saved",
+       x = "model", y = "potential money saved", 
+       caption = paste0("CLV was calculated as an average, that value was ", clv_average, ". Cost of special offer was calculated as free banking for the year ", cost_of_keeping_customer, "." ))
+
+```
+
+> **Summary:** even though MARS is not the most effective, it could potentially save a bank most money.
+
+## Conclusion
+
+I've been thinking about this cost of modeling for some time now, since I came across this problem in a professional context. Academically, we can use a confusion matrix, AUC or RMSE to calculate the value of a model using outcome as our only metric. But in a business context the cost is most important:
+
+```{r kable of cost, echo=FALSE}
+
+bank_cost %>% 
+  kableExtra::kable(caption = "Comparing the Cost of Prediction") %>% 
+  kableExtra::kable_styling()
+
+```
+
+### Potential Impact
+
+This approach is not unique, many authors have grappled with this cost problem [@lemmens2020managing], [@hadden2007computer], [@stripling2018profit]. Although the problem of explaining complex models is well studied [@canhoto2020artificial] state "managers are delaying the adoption of AI and ML because they are unsure how these technologies can help their firms". 
+
+I don't think we have much practical advise on explaining in simple terms, to busy stakeholders, the value of machine learning to a business. Here I think I can offer some advise: 
+
+- talk money to business people 
+- keep your presentation short (5 slides) _you can go deeper to follow up on any questions that arise_
+- keep the messaging tight, *AUC* don't rock, for a business audience, don't talk density plots, talk money.  
+
+### Limitations
+
+**The cost model I used is limited:** I assumed CLV and Cost of Keeping a Customer, in real world context, we would have more variables to model against. I also modeled an average CLV, instead calculating individual value of each customer. 
+
+### Future Work
+
+I came across one **R** library that deals with cost of cost sensitive classification [@mlr3], I'd like to apply that knowledge to this problem. I'd also like to submit a paper on this work. 
+
+Thank you for your time in reading this work.
+
+## References
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+```
+
